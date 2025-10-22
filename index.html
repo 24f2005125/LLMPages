@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Required Files Status — Checker</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; margin: 24px; color: #111; }
+    h1 { margin-bottom: 8px; }
+    .grid { display: grid; grid-template-columns: 1fr 320px; gap: 20px; align-items: start; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
+    .file-list { list-style: none; padding: 0; margin: 0; }
+    .file-item { padding: 8px 6px; border-bottom: 1px dashed #eee; display:flex; justify-content:space-between; align-items:center; gap:12px; }
+    .file-item:last-child { border-bottom: none; }
+    .status { font-weight: 600; padding: 4px 8px; border-radius: 6px; font-size: 0.9em; }
+    .ok { background: #e6ffed; color: #047a2d; border: 1px solid #b4f1c5; }
+    .missing { background: #ffecec; color: #a12a2a; border: 1px solid #f5c2c2; }
+    .warn { background: #fff7e6; color: #7a5600; border: 1px solid #f1d3a8; }
+    .error-box { border: 2px solid #e05b5b; background: #fff2f2; color: #6a1b1b; padding: 12px; border-radius: 8px; margin: 12px 0; }
+    a.file-link { text-decoration: none; color: #0366d6; }
+    pre { background: #f8f9fa; padding: 8px; border-radius: 6px; overflow: auto; max-height: 220px; }
+    footer { margin-top: 18px; font-size: 0.9em; color: #555; }
+  </style>
+</head>
+<body>
+  <h1>Required Files Status</h1>
+  <p class="card">This page links to and checks for the presence and basic validity of the files requested by the assignment. It will display explicit errors if any required item is missing or fails basic validation.</p>
+
+  <div class="grid">
+    <div class="card" id="checker-card">
+      <h2>Files</h2>
+      <ul class="file-list" id="file-list" role="list"></ul>
+
+      <div id="errors-container" aria-live="polite"></div>
+
+    </div>
+
+    <div class="card" id="details-card">
+      <h2>Details & Preview</h2>
+      <div id="details">
+        <p>Select a file from the list to preview or see validation details. Console logs contain an audit trail.</p>
+        <pre id="preview">No preview yet.</pre>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    Expected files (the page will try to fetch these relative to the site root):<br/>
+    ashravan.txt, dilemma.json, about.md, pelican.svg, restaurant.json, prediction.json, LICENSE, uid.txt (uid attachment)
+  </footer>
+
+  <script>
+(function () {
+  // Required files as specified in the task. Use exact names.
+  const required = [
+    { name: 'ashravan.txt', type: 'text' },
+    { name: 'dilemma.json', type: 'json' },
+    { name: 'about.md', type: 'text' },
+    { name: 'pelican.svg', type: 'image' },
+    { name: 'restaurant.json', type: 'json' },
+    { name: 'prediction.json', type: 'json' },
+    { name: 'LICENSE', type: 'text' },
+    // uid.txt attachment is provided in the attachments list with a specific URL.
+    // We will provide both the expected filename link (uid.txt) and attempt to fetch via the attachment URL provided.
+    { name: 'uid.txt', type: 'text', attachmentUrl: './06671351-7c02-47e1-9f3e-e3a7a77ce56c-uid.txt' }
+  ];
+
+  // Basic DOM element references, validate existence
+  const listEl = document.getElementById('file-list');
+  const detailsEl = document.getElementById('details');
+  const previewEl = document.getElementById('preview');
+  const errorsContainer = document.getElementById('errors-container');
+
+  if (!listEl || !detailsEl || !previewEl || !errorsContainer) {
+    const msg = 'Required DOM elements (file-list/details/preview/errors-container) are missing. Cannot proceed.';
+    console.error(msg);
+    document.body.innerHTML = '<div class="error-box">' + msg + '</div>';
+    return;
+  }
+
+  // Helper to create list entries
+  function renderFileList(items) {
+    listEl.innerHTML = '';
+    for (const it of items) {
+      const li = document.createElement('li');
+      li.className = 'file-item';
+      const left = document.createElement('div');
+      const link = document.createElement('a');
+      link.href = it.attachmentUrl ? it.attachmentUrl : it.name;
+      link.textContent = it.name;
+      link.className = 'file-link';
+      link.target = '_blank';
+      left.appendChild(link);
+
+      const right = document.createElement('div');
+      const status = document.createElement('span');
+      status.textContent = 'checking...';
+      status.className = 'status warn';
+      right.appendChild(status);
+
+      li.appendChild(left);
+      li.appendChild(right);
+
+      // store statusEl and data on element for later update
+      li._statusEl = status;
+      li._meta = it;
+      li.addEventListener('click', () => {
+        // when selected, show preview if content fetched
+        if (it._fetched) {
+          previewEl.textContent = it._fetchedPreview || JSON.stringify(it._fetched, null, 2);
+        } else {
+          previewEl.textContent = 'No preview for ' + it.name;
+        }
+      });
+
+      listEl.appendChild(li);
+      it._li = li;
+    }
+  }
+
+  renderFileList(required);
+
+  // Fetch each file and validate according to type. Log actions for auditability.
+  const missingFiles = [];
+  const invalidFiles = [];
+  const foundFiles = [];
+
+  function setStatus(it, state, message) {
+    const statusEl = it._li && it._li._statusEl;
+    if (!statusEl) return;
+    statusEl.textContent = state;
+    statusEl.className = 'status ' + (state === 'OK' ? 'ok' : state === 'missing' ? 'missing' : 'warn');
+    statusEl.title = message || '';
+  }
+
+  async function checkFile(it) {
+    const url = it.attachmentUrl ? it.attachmentUrl : it.name;
+    console.info('Attempting fetch for', it.name, 'via', url);
+    try {
+      const resp = await fetch(url, {cache: 'no-store'});
+      if (!resp.ok) {
+        console.warn('Fetch failed for', it.name, 'status', resp.status);
+        missingFiles.push(it.name);
+        setStatus(it, 'missing', 'HTTP ' + resp.status);
+        console.error('Missing file:', it.name, 'fetched URL:', url, 'status:', resp.status);
+        return;
+      }
+
+      // got it
+      let value;
+      if (it.type === 'json') {
+        try {
+          value = await resp.json();
+        } catch (e) {
+          console.error('JSON parse error for', it.name, e);
+          invalidFiles.push({name: it.name, reason: 'invalid JSON'});
+          setStatus(it, 'invalid', 'invalid JSON');
+          return;
+        }
+      } else {
+        value = await resp.text();
+      }
+
+      it._fetched = value;
+      it._fetchedPreview = (typeof value === 'string' && value.length > 400) ? value.slice(0,400) + '\n...[truncated]' : (typeof value === 'object' ? JSON.stringify(value, null, 2) : value);
+      setStatus(it, 'OK', 'fetched successfully');
+      foundFiles.push(it.name);
+      console.info('Fetched', it.name, 'keys/resolved:', (it.type === 'json' && typeof it._fetched === 'object') ? Object.keys(it._fetched) : 'text');
+
+      // perform file-specific validation where applicable
+      if (it.name === 'about.md') {
+        const text = (typeof value === 'string' ? value : '');
+        const words = text.trim().split(/\s+/).filter(Boolean);
+        console.info('about.md words:', words.length);
+        if (words.length !== 3) {
+          invalidFiles.push({name: it.name, reason: 'about.md must contain exactly three words (found ' + words.length + ')'});
+          setStatus(it, 'invalid', 'must contain exactly three words');
+        }
+      }
+
+      if (it.name === 'dilemma.json') {
+        // expected shape: people, case_1, case_2
+        const keys = value && typeof value === 'object' ? Object.keys(value) : [];
+        const requiredKeys = ['people','case_1','case_2'];
+        const missing = requiredKeys.filter(k => !keys.includes(k));
+        if (missing.length) {
+          invalidFiles.push({name: it.name, reason: 'missing keys: ' + missing.join(', ')});
+          setStatus(it, 'invalid', 'missing keys: ' + missing.join(', '));
+          console.error('dilemma.json missing keys:', missing);
+        } else {
+          console.info('dilemma.json keys OK. people=', value.people);
+        }
+      }
+
+      if (it.name === 'restaurant.json') {
+        // expected {city:"Chennai", lat: float, long: float, name: str, what_to_eat: str}
+        const v = value;
+        const problems = [];
+        if (!v || typeof v !== 'object') problems.push('not an object');
+        else {
+          if (v.city !== 'Chennai') problems.push('city must be "Chennai"');
+          if (typeof v.lat !== 'number') problems.push('lat must be a number');
+          if (typeof v.long !== 'number') problems.push('long must be a number');
+          if (typeof v.name !== 'string') problems.push('name must be a string');
+          if (typeof v.what_to_eat !== 'string') problems.push('what_to_eat must be a string');
+        }
+        if (problems.length) {
+          invalidFiles.push({name: it.name, reason: problems.join('; ')});
+          setStatus(it, 'invalid', problems.join('; '));
+          console.error('restaurant.json validation problems:', problems);
+        } else {
+          console.info('restaurant.json looks consistent for Chennai:', v.name, v.lat, v.long);
+        }
+      }
+
+      if (it.name === 'prediction.json') {
+        const v = value;
+        if (!v || typeof v !== 'object' || typeof v.rate !== 'number' || v.rate < 0 || v.rate > 1) {
+          invalidFiles.push({name: it.name, reason: 'prediction.json must contain {rate: float between 0 and 1, reason: string}'});
+          setStatus(it, 'invalid', 'invalid prediction.json format');
+          console.error('prediction.json invalid format or rate out of range', v);
+        } else {
+          console.info('prediction.json rate:', v.rate, 'reason:', v.reason);
+        }
+      }
+
+      if (it.name === 'pelican.svg') {
+        const text = typeof value === 'string' ? value : '';
+        if (!text.includes('<svg') || !text.includes('</svg>')) {
+          invalidFiles.push({name: it.name, reason: 'pelican.svg content does not appear to be valid SVG'});
+          setStatus(it, 'invalid', 'invalid SVG');
+        } else {
+          console.info('pelican.svg appears to be valid SVG (basic check passed).');
+        }
+      }
+
+      if (it.name === 'ashravan.txt') {
+        const text = typeof value === 'string' ? value : '';
+        // count words
+        const words = text.trim().split(/\s+/).filter(Boolean);
+        console.info('ashravan.txt word count:', words.length);
+        if (words.length < 300 || words.length > 400) {
+          invalidFiles.push({name: it.name, reason: 'ashravan.txt must be 300-400 words (found ' + words.length + ')'});
+          setStatus(it, 'invalid', 'word count out of 300-400 range');
+        } else {
+          console.info('ashravan.txt meets the word-count requirement.');
+        }
+      }
+
+      // validate LICENSE is MIT if present? We cannot invent content; if present, we won't assert exact MIT text here, but will note in console.
+      if (it.name === 'LICENSE') {
+        const text = typeof value === 'string' ? value : '';
+        if (!text.includes('MIT License') && !text.includes('Permission is hereby granted')) {
+          console.warn('LICENSE does not appear to contain the MIT license text.');
+          // do not mark invalid automatically; just warn
+          setStatus(it, 'OK', 'fetched (license content does not look like MIT)');
+        } else {
+          console.info('LICENSE contains MIT license markers.');
+        }
+      }
+
+    } catch (err) {
+      console.error('Error fetching', it.name, err);
+      missingFiles.push(it.name);
+      setStatus(it, 'missing', 'fetch error');
+    }
+  }
+
+  // perform all checks
+  (async function runAll() {
+    for (const it of required) {
+      await checkFile(it);
+    }
+
+    // After checks, build user-facing error summary if anything missing/invalid
+    const problems = [];
+    if (missingFiles.length) {
+      problems.push('Missing files: ' + missingFiles.join(', '));
+    }
+    if (invalidFiles.length) {
+      problems.push('Invalid files: ' + invalidFiles.map(i => i.name + ' (' + i.reason + ')').join('; '));
+    }
+
+    if (problems.length) {
+      const html = '<div class="error-box"><strong>Errors detected:</strong><ul>' + problems.map(p => '<li>' + escapeHtml(p) + '</li>').join('') + '</ul><p>Ensure the files listed are added to the site root with exactly the names shown. The page logs details to the console for auditing.</p></div>';
+      errorsContainer.innerHTML = html;
+      console.error('Validation problems:', problems);
+    } else {
+      errorsContainer.innerHTML = '<div class="card"><strong>All required files detected and basic validations passed.</strong></div>';
+      console.info('All files detected and validated (basic checks). Found files:', foundFiles);
+    }
+
+    // Provide link anchors to all required file paths (use attachment URL for uid.txt)
+    addLinksSummary(required);
+  })();
+
+  function addLinksSummary(items) {
+    const container = document.createElement('div');
+    container.className = 'card';
+    const title = document.createElement('h3');
+    title.textContent = 'Direct links';
+    container.appendChild(title);
+    const ul = document.createElement('ul');
+    ul.style.paddingLeft = '18px';
+    for (const it of items) {
+      const li = document.createElement('li');
+      const a = document.createElement('a');
+      a.href = it.attachmentUrl ? it.attachmentUrl : it.name;
+      a.textContent = it.name;
+      a.target = '_blank';
+      a.className = 'file-link';
+      li.appendChild(a);
+      ul.appendChild(li);
+    }
+    container.appendChild(ul);
+    detailsEl.insertBefore(container, previewEl.parentElement);
+  }
+
+  function escapeHtml(s) {
+    return (s+'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // Expose a debug helper for auditors
+  window.__required_files_audit = {
+    required,
+    logSummary: function() {
+      console.log('Audit: required files list:', required.map(r => r.name));
+      required.forEach(r => {
+        console.log('File:', r.name, 'fetched?', !!r._fetched, 'preview:', r._fetchedPreview ? r._fetchedPreview.slice(0,200) : null);
+      });
+    }
+  };
+
+  console.info('Checker initialized. Required files:', required.map(r => r.name));
+})();
+  </script>
+</body>
+</html>
